@@ -1,0 +1,39 @@
+El análisis y la explicación del funcionamiento del código fuente adjunto, centrado en la abstracción de hardware y la gestión del tiempo, se presentan a continuación.
+
+---
+
+## Análisis y Explicación del Código Fuente
+
+### 1. `board.h`: Abstracción de Hardware
+
+El archivo `board.h` es fundamentalmente una capa de **Abstracción de Hardware (HAL)** basada en macros. Su propósito principal es aislar el código de la aplicación de los detalles específicos del microcontrolador o la placa de desarrollo utilizada, facilitando la portabilidad.
+
+* **Selección de Placa:** Define constantes numéricas para varias placas STM32 (Nucleo y Discovery) y utiliza la macro `BOARD` para seleccionar la configuración activa. En este caso, está configurada para **`NUCLEO_F103RC`**.
+* **Definiciones de I/O:** Basándose en el valor de `BOARD`, el archivo define macros para:
+    * **Botón de Usuario (`BTN_A`):** Especifica el pin (`BTN_A_PIN`) y el puerto (`BTN_A_PORT`) de E/S. También define las constantes de estado para "presionado" (`BTN_A_PRESSED`) y "en reposo" (`BTN_A_HOVER`). Para el `NUCLEO_F103RC`, el botón es activo por bajo (`GPIO_PIN_RESET` es presionado).
+    * **LED de Usuario (`LED_A`):** Especifica el pin (`LED_A_PIN`) y el puerto (`LED_A_PORT`) del LED, junto con sus estados lógicos para encendido (`LED_A_ON`) y apagado (`LED_A_OFF`). Para el `NUCLEO_F103RC`, el LED es activo por alto (`GPIO_PIN_SET` es encendido).
+
+### 2. `dwt.h`: Medición de Tiempo de Alta Precisión (WCET)
+
+El archivo `dwt.h` proporciona un conjunto de funciones *inline* para medir el tiempo de ejecución del código con una **resolución de ciclo de CPU**, utilizando la unidad **DWT (Data Watchpoint and Trace)** del procesador ARM Cortex-M.
+
+| Función | Descripción |
+| :--- | :--- |
+| **`cycle_counter_init()`** | Habilita el hardware DWT, borra y comienza el conteo del registro `DWT->CYCCNT`. |
+| **`cycle_counter_reset()`** | Reinicia el contador de ciclos (`DWT->CYCCNT = 0`). |
+| **`cycle_counter_get()`** | Retorna el valor actual del contador de ciclos (número de ciclos de CPU transcurridos). |
+| **`cycle_counter_get_time_us()`** | Retorna el tiempo transcurrido en **microsegundos ($\mu s$)**. Esta función realiza la conversión dividiendo el número de ciclos (`DWT->CYCCNT`) por la frecuencia del reloj del sistema en MHz (`SystemCoreClock / 1000000`). |
+
+Estas funciones son esenciales para el cálculo del **WCET (Worst-Case Execution Time)** en sistemas de tiempo real, permitiendo medir con precisión la duración de una porción de código (como la función de actualización de una tarea).
+
+### 3. `systick.c`: Retrasos Bloqueantes con SysTick
+
+El archivo `systick.c` implementa una función para generar retrasos **bloqueantes** (`systick_delay_us`) con precisión de microsegundos, basándose en el temporizador **SysTick**.
+
+* **`systick_delay_us(uint32_t delay_us)`:**
+    * Calcula el número total de **cuentas (ticks) de SysTick** requeridas para el tiempo de retraso solicitado, utilizando la frecuencia del reloj del sistema (`SystemCoreClock`).
+    * Monitorea el valor decreciente del contador de SysTick (`SysTick->VAL`) en un lazo infinito (`while(1)`).
+    * Implementa una lógica para calcular el tiempo **transcurrido (`elapsed`)** que maneja correctamente el caso de **desbordamiento (wrap-around)** del contador (cuando el contador vuelve a cargarse desde el valor de `SysTick->LOAD`).
+    * El bucle se rompe cuando el tiempo transcurrido alcanza o supera el valor objetivo (`target`).
+
+Esta función es útil para generar **pausas cortas y precisas** que son críticas para la correcta operación de algunos periféricos (como la inicialización de un LCD, por ejemplo), pero es **bloqueante**, lo que significa que el microcontrolador no puede ejecutar otras tareas mientras el retraso está activo.

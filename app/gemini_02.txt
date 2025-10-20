@@ -1,0 +1,91 @@
+El código fuente implementa un sistema básico de planificación de tareas basado en tiempo (time-triggered) para un microcontrolador, con un mecanismo de medición del tiempo de ejecución de las tareas (WCET) y una herramienta de registro (`logger`).
+
+## 1. Análisis y Explicación del Código Fuente
+
+El sistema funciona con un **planificador periódico** dentro de `app_update()` que se activa por la ocurrencia de "ticks" de sistema, generados por una interrupción de temporizador (presumiblemente SysTick).
+
+### `app.c`
+
+Este archivo contiene el **planificador (scheduler)** y la lógica de medición de tiempos.
+
+* **Variables Clave:**
+    * `g_app_tick_cnt`: Un contador global de ticks del sistema (incrementado en la ISR, decrementado aquí).
+    * `g_app_runtime_us`: Acumula el **tiempo de ejecución total en $\mu s$** de todas las tareas en un ciclo de `app_update()`.
+    * `task_dta_list[index].WCET`: Almacena el **peor tiempo de ejecución (WCET)** en $\mu s$ de cada tarea.
+* **`app_init()`:** Inicializa contadores y el **Cycle Counter** (un temporizador de alta resolución, probablemente el DWT_CYCCNT del Cortex-M) para medir el tiempo.
+* **`app_update()`:** Es el corazón del planificador.
+    1.  Deshabilita y luego habilita las interrupciones (`__asm("CPSID i");`) para acceder de forma segura a `g_app_tick_cnt`.
+    2.  Verifica si hay ticks pendientes (`g_app_tick_cnt > G_APP_TICK_CNT_INI`).
+    3.  Mientras haya ticks pendientes (bucle `while`):
+        * Decrementa `g_app_tick_cnt` (consumiendo el tick).
+        * Reinicia `g_app_runtime_us = 0$.
+        * Itera sobre todas las tareas:
+            * Mide el tiempo de ejecución con `cycle_counter_reset()` y `cycle_counter_get_time_us()`.
+            * Ejecuta la tarea: `(*task_cfg_list[index].task_update)(...)`.
+            * Acumula el tiempo en `g_app_runtime_us`.
+            * **Actualiza el WCET:** Si el tiempo actual de la tarea es mayor que el `WCET` almacenado, actualiza `task_dta_list[index].WCET`.
+
+### `task_test.c`
+
+Contiene la implementación de una tarea de prueba con una lógica interna de temporización.
+
+* **Variables Clave:**
+    * `g_task_test_tick_cnt`: Un contador de ticks local (global, compartido con la ISR) para temporizar esta tarea. **Se incrementa en la ISR de SysTick (junto con `g_app_tick_cnt`)**.
+* **`task_test_update(void *parameters)`:**
+    * Implementa un **sub-scheduler o temporizador** específico para esta tarea.
+    * Utiliza un bucle `while` para procesar los ticks pendientes de `g_task_test_tick_cnt`.
+    * Por cada tick procesado, decrementa `g_task_test_tick_cnt`, incrementa `g_task_test_cnt`, y llama a `task_test_statechart()`.
+* **`task_test_statechart()`:**
+    * Contiene la lógica de la máquina de estados. Decrementa un contador interno (`task_test_dta.tick`).
+    * Cuando el contador interno llega a cero, reinicia el contador e imprime un mensaje en el display (o registra un log si se usara `LOGGER_INFO` aquí).
+
+### `logger.h` y `logger.c`
+
+Estos archivos implementan una utilidad de registro (logging).
+
+* **`logger.h`:** Define las macros de registro.
+    * **`LOGGER_LOG(...)`:** Es la macro principal. Si `LOGGER_CONFIG_ENABLE` es 1, realiza:
+        1.  **Deshabilita Interrupciones** (`__asm("CPSID i");`) para proteger el *buffer* de registro.
+        2.  Formatea el mensaje en `logger_msg_buffer_` usando `snprintf`.
+        3.  Llama a `logger_log_print_()` para enviar el mensaje.
+        4.  **Habilita Interrupciones** (`__asm("CPSIE i");`).
+    * **`LOGGER_INFO(...)`:** Una macro de conveniencia que antepone `"[info] "` al mensaje y añade un salto de línea.
+* **`logger.c`:**
+    * La función `logger_log_print_()` envía el mensaje. Si `LOGGER_CONFIG_USE_SEMIHOSTING` es 1, utiliza `printf()` y `fflush(stdout)`, lo que implica comunicación con la herramienta de depuración (e.g., OpenOCD o J-Link), una operación típicamente **muy lenta**.
+
+---
+
+## 2. Evolución y Unidades de Medida de las Variables
+
+| Variable | Unidad de Medida | Tipo de Evolución |
+| :--- | :--- | :--- |
+| **`g_app_runtime_us`** | Microsegundos ($\mu s$) | **Volátil:** Se **reinicia a 0** al inicio de cada ciclo de planificación en `app_update()` y acumula el tiempo de ejecución de las tareas en ese ciclo. |
+| **`task_dta_list[index].WCET`** | Microsegundos ($\mu s$) | **Acumulativa:** Almacena el **valor máximo** de tiempo de ejecución de la tarea `index` medido hasta el momento. Solo aumenta. |
+| **`g_task_test_tick_cnt`** | Ticks de Sistema ($\approx 1 \, ms$) | **Fluctuante:** Se **incrementa** periódicamente en la interrupción (ej. cada $1 \, ms$) y se **decrementa** en `task_test_update()` al procesar los eventos. |
+
+---
+
+## 3. Impacto de Usar `LOGGER_INFO()`
+
+El uso de `LOGGER_INFO()` (que llama a `LOGGER_LOG()`) tiene un **impacto significativo y negativo** en el rendimiento del sistema, especialmente si se utiliza **Semihosting** (`LOGGER_CONFIG_USE_SEMIHOSTING = 1`).
+
+### Impacto en el Tiempo de Ejecución
+
+1.  **Aumento Drástico del Tiempo de Ejecución ($T_{task}$):**
+    * El envío de datos a través de **Semihosting** (`printf` en `logger_log_print_()`) requiere que el microcontrolador se detenga y se comunique con el depurador, lo cual es una operación extremadamente lenta (puede tomar **cientos de miles o incluso millones de ciclos de CPU**).
+    * Si se inserta un `LOGGER_INFO()` dentro de `task_test_update()` o `task_test_statechart()`, el tiempo de ejecución de la tarea ($T_{task}$) aumentará enormemente.
+
+2.  **Impacto en la Medición de Tiempo (`g_app_runtime_us` y WCET):**
+
+    * **`g_app_runtime_us`**: Aumentará sustancialmente en cualquier ciclo de `app_update()` donde se ejecute una tarea que contenga `LOGGER_INFO()`. El valor registrado reflejará el tiempo que tardó el **logging** más el tiempo de la lógica de la tarea.
+    * **`task_dta_list[index].WCET`**: Es el más afectado. Dado que el WCET se actualiza al valor máximo de tiempo de ejecución medido, la primera vez que se ejecute la línea con `LOGGER_INFO()`, el `WCET` se establecerá en un valor muy alto (el tiempo del logging por Semihosting). A partir de ese momento, el `WCET` se mantendrá en ese valor inflado, a menos que una ejecución posterior tome aún más tiempo.
+
+3.  **Impacto en la Concurrencia y la Latencia:**
+
+    * **Latencia de Interrupción:** Las macros de logger **deshabilitan y habilitan las interrupciones** (`__asm("CPSID i");`). Aunque el logging es lento, las interrupciones se reanudarán durante el proceso de Semihosting. Sin embargo, si la rutina de registro es corta (solo copia el string), el tiempo que las interrupciones están deshabilitadas aumenta la latencia del sistema.
+    * **Fallo del Planificador:** Si el tiempo de ejecución de la tarea con el logger ($T_{task, con\_logger}$) supera el período del tick de sistema (ej. $1 \, ms$), el planificador en `app_update()` no podrá ejecutarse a tiempo. El bucle `while (b_time_update_required)` intentará procesar los ticks acumulados (*tienes un **Deadlock/Starvation** potencial si $T_{task} > T_{tick}$*).
+
+4.  **Impacto en `g_task_test_tick_cnt`:**
+
+    * Esta variable sigue siendo controlada por la ISR (incremento) y por `task_test_update()` (decremento). Su valor no se ve afectado directamente por el tiempo de ejecución, **pero su consumo sí**.
+    * Si `task_test_update()` con el logger tarda mucho, **menos veces por segundo** se decrementará `g_task_test_tick_cnt`, y por lo tanto, la lógica interna de la tarea (`task_test_statechart()`) se ejecutará con **menos frecuencia**. El intervalo de actualización del display (actualmente cada 1000 ticks) se verá **ralentizado**.

@@ -1,0 +1,142 @@
+Aquí tienes el análisis y la explicación del funcionamiento del código fuente proporcionado, seguido de la evolución de las variables solicitadas.
+
+## 1. Análisis y Explicación del Código Fuente
+
+El código implementa un sistema en **Bare Metal** y **Event-Triggered Systems (ETS)** para un microcontrolador **STM32F1xx**, utilizando la **HAL (Hardware Abstraction Layer)**. El sistema se basa en un lazo infinito (`main.c`) que llama periódicamente a una función de actualización (`app_update()`) controlada por interrupciones del **SysTick**.
+
+---
+
+### **`main.c`**
+
+* **Punto de Entrada:** La función `main()` es el punto de inicio.
+* **Inicialización:** Llama a `HAL_Init()`, `SystemClock_Config()`, e inicializa periféricos como GPIO y USART2 (`MX_GPIO_Init()`, `MX_USART2_UART_Init()`).
+* **Inicialización de la Aplicación:** Llama a `app_init()` para configurar el entorno de la aplicación y las tareas.
+* **Loop Principal:** Contiene un bucle infinito (`while (1)`) que llama repetidamente a `app_update()`. Este es el **scheduler** o lazo principal de la aplicación.
+
+---
+
+### **`stm32f1xx_it.c`**
+
+* **Manejadores de Interrupción (IRQs):** Contiene las rutinas de servicio de interrupción (ISR) para las excepciones del Cortex-M3 y las IRQs de periféricos.
+* **`SysTick_Handler()`:**
+    * Se ejecuta con cada tick del temporizador SysTick (generalmente cada 1 ms en sistemas HAL estándar, aunque esto depende de la configuración de `HAL_Init()`).
+    * Llama a `HAL_IncTick()` para incrementar el contador de ticks de la HAL.
+    * Llama a `HAL_SYSTICK_IRQHandler()`, que a su vez llama a la *callback* definida en `app.c`: `HAL_SYSTICK_Callback()`.
+* **`EXTI15_10_IRQHandler()`:** Maneja interrupciones externas (como la del botón B1).
+
+---
+
+### **`app.c`**
+
+Este archivo contiene la lógica principal del sistema de planificación y gestión del tiempo.
+
+* **Estructuras:**
+    * `task_cfg_t`: Define la configuración de una tarea, incluyendo punteros a las funciones de inicialización y actualización (`task_init`, `task_update`) y sus parámetros.
+    * `task_dta_t`: Almacena datos de una tarea, notablemente el **WCET (Worst-Case Execution Time)** en microsegundos.
+* **Variables Globales:**
+    * `g_app_cnt`: Contador de ejecuciones de la aplicación (número de ciclos de actualización).
+    * `g_app_runtime_us`: **Tiempo total de ejecución de las tareas** dentro de un ciclo de `app_update()`, medido en microsegundos ($\mu s$).
+    * `g_app_tick_cnt`: **Contador de ticks de sistema pendientes** (controlado por interrupción, decrementado por `app_update()`).
+    * `task_dta_list[TASK_QTY]`: Arreglo de datos de tarea para almacenar el WCET de cada una.
+* **`app_init()`:**
+    * Inicializa los contadores globales (`g_app_cnt`, `g_app_tick_cnt`) a 0.
+    * Inicializa el **Cycle Counter** (`cycle_counter_init()`) para medir tiempos de ejecución.
+    * Itera sobre `task_cfg_list` para ejecutar la función `task_init` de cada tarea y establece su WCET inicial a 0.
+    * Inicializa `g_task_test_tick_cnt`.
+* **`app_update()`:** **Es el planificador basado en ticks (tiempo).**
+    * Verifica si `g_app_tick_cnt` es mayor a 0 (es decir, si ha ocurrido al menos un tick de SysTick desde la última ejecución).
+    * Si hay ticks pendientes:
+        1.  Decrementa `g_app_tick_cnt` (indicando que se está procesando un ciclo de tiempo).
+        2.  Incrementa `g_app_cnt`.
+        3.  Reinicia `g_app_runtime_us` a 0.
+        4.  Itera sobre la lista de tareas (`task_cfg_list`):
+            * Reinicia el contador de ciclos (`cycle_counter_reset()`).
+            * Ejecuta la función `task_update` de la tarea.
+            * Obtiene el tiempo de ejecución de la tarea en microsegundos (`cycle_counter_get_time_us()`).
+            * Suma este tiempo a `g_app_runtime_us`.
+            * **Actualiza el WCET de la tarea:** Si el tiempo de ejecución actual es mayor que el WCET almacenado (`task_dta_list[index].WCET`), el WCET se actualiza.
+    * El bucle `while (b_time_update_required)` asegura que el sistema procese todos los ticks de SysTick que hayan ocurrido (manejo de **ticks acumulados**).
+* **`HAL_SYSTICK_Callback()`:**
+    * Se llama desde `SysTick_Handler()`.
+    * Incrementa los contadores de ticks: `g_app_tick_cnt` y `g_task_test_tick_cnt`.
+
+---
+
+### **`task_test_attribute.h`**
+
+* Define la estructura `task_test_dta_t`, que contiene el miembro `tick` de tipo `uint32_t`. Esta es la estructura de datos para la tarea de prueba.
+
+---
+
+### **`task_test.c`**
+
+Contiene la implementación de la tarea de prueba.
+
+* **Variables Globales:**
+    * `g_task_test_cnt`: Contador de ejecuciones de la tarea de prueba.
+    * `g_task_test_tick_cnt`: **Contador de ticks de sistema** que se utiliza para temporizar la ejecución de la tarea. Es incrementado en la ISR (`HAL_SYSTICK_Callback()`).
+* **`task_test_init()`:** Inicializa `g_task_test_cnt` y el campo `tick` de la estructura `task_test_dta` a `DEL_TEST_XX_MAX` (1000). También inicializa un display LCD.
+* **`task_test_update()`:**
+    * **Scheduler Local:** Utiliza `g_task_test_tick_cnt` como mecanismo de *tick* local.
+    * Si `g_task_test_tick_cnt` es mayor a 0, lo decrementa, incrementa `g_task_test_cnt`, y llama a `task_test_statechart()`.
+    * Procesa todos los ticks pendientes antes de salir.
+* **`task_test_statechart()`:**
+    * Implementa una **máquina de estado simple basada en tiempo/ticks**.
+    * Si el contador `p_task_test_dta->tick` es mayor que 0, lo decrementa.
+    * Si `p_task_test_dta->tick` llega a 0, se reinicia a `DEL_TEST_XX_MAX` (1000) y **actualiza el display LCD** con el número de ejecución de la tarea (`g_task_test_cnt/1000ul`).
+
+---
+
+### **`display.c`**
+
+* Contiene las funciones para inicializar y controlar un **display LCD (presumiblemente 20x4)**, configurado para comunicación de **4 bits** (`DISPLAY_CONNECTION_GPIO_4BITS`).
+* Funciones como `displayInit()`, `displayCharPositionWrite()`, y `displayStringWrite()` permiten interactuar con el LCD.
+
+---
+## 2. Evolución de Variables
+
+### Unidad de Medida
+
+| Variable | Unidad de Medida | Origen de la Unidad |
+| :--- | :--- | :--- |
+| **`g_app_runtime_us`** | Microsegundos ($\mu s$) | Definido como `WCET` en `app.c` y obtenido mediante `cycle_counter_get_time_us()`. |
+| **`task_dta_list[index].WCET`** | Microsegundos ($\mu s$) | Definido como `WCET` en `app.c` y obtenido mediante `cycle_counter_get_time_us()`. |
+| **`g_task_test_tick_cnt`** | Ticks de Sistema (generalmente milisegundos - $ms$) | Es un contador de ticks, incrementado por `HAL_SYSTICK_Callback()`, que típicamente ocurre cada 1 ms en la configuración estándar de SysTick de HAL. |
+
+### Evolución en la Ejecución
+
+Se asume que el SysTick genera un tick cada **1 ms**, lo que significa que `g_app_tick_cnt` y `g_task_test_tick_cnt` se incrementan cada 1 ms.
+
+#### **Inicio (`app_init()` en `app.c`)**
+
+| Variable | Valor Inicial (Unit) | Razón |
+| :--- | :--- | :--- |
+| **`g_app_runtime_us`** | $0 \, \mu s$ | No se inicializa explícitamente en `app_init()`, pero se reinicia a 0 al inicio de `app_update()`. |
+| **`task_dta_list[index].WCET`** | $0 \, \mu s$ | Se inicializa a `TASK_X_WCET_INI` (0) en el bucle `for` de `app_init()`. |
+| **`g_task_test_tick_cnt`** | $0 \, ms$ (Ticks) | Se inicializa a `G_APP_TICK_CNT_INI` (0) en `app_init()`. |
+
+---
+
+#### **Ejecuciones Sucesivas de `app_update()` (Bucle Principal)**
+
+Asumimos que la ejecución de `app_update()` es mucho más rápida que el período de SysTick (1 ms), y que $T_{task}$ es el tiempo de ejecución de `task_test_update()` en microsegundos.
+
+| Condición/Etapa | **`g_app_runtime_us` ($\mu s$)** | **`task_dta_list[0].WCET` ($\mu s$)** | **`g_task_test_tick_cnt` ($ms$/Ticks)** |
+| :--- | :--- | :--- | :--- |
+| **1. Tick Pendiente (Antes de `app_update`)** | Valor del ciclo anterior. | Valor del ciclo anterior. | $N$ ($N > 0$ ticks acumulados). |
+| **2. Inicio de `app_update()`** | **$0$** (Se reinicia al inicio del bucle `while (b_time_update_required)`). | Valor anterior. | $N - 1$ (Se decrementa $\times 1$ al inicio). |
+| **3. Durante la ejecución de la tarea** | $\approx T_{task}$ (Se acumula el tiempo de ejecución). | $\max(\text{anterior WCET}, T_{task})$ (Se actualiza al mayor tiempo visto). | $N - 1$ (No se modifica durante la ejecución de la tarea). |
+| **4. Fin del Ciclo de `app_update()`** | $\approx T_{task}$ | $\max(\text{anterior WCET}, T_{task})$ | Dependerá de si se ha acumulado otro tick durante la ejecución. Si no, se decrementa hasta $0$. |
+
+**Nota sobre `g_task_test_tick_cnt`:**
+
+* Es incrementado en la interrupción **`HAL_SYSTICK_Callback()`** (ej. $0 \rightarrow 1 \rightarrow 2 \rightarrow ...$)
+* Es decrementado en **`task_test_update()`** cuando se ejecuta la tarea (ej. $2 \rightarrow 1 \rightarrow 0$)
+* Cuando `g_task_test_tick_cnt` se decrementa y es mayor a 0, la tarea **`task_test_statechart()`** se ejecuta.
+* La máquina de estado de prueba solo actualiza el LCD cuando su contador interno (`p_task_test_dta->tick`) llega a 0, lo que ocurre después de **1000** ejecuciones de `task_test_statechart()`. Dado que `g_task_test_tick_cnt` se decrementa a 0 por cada tick (1 ms), el LCD se actualiza aproximadamente cada $1000 \times 1 \, \text{ms} = **1$ segundo**.
+
+**Conclusión del WCET:**
+El valor de **`task_dta_list[index].WCET`** (para `index = 0` que corresponde a `task_test`) será el **peor tiempo de ejecución medido en $\mu s$** de la función `task_test_update()` desde el inicio del sistema. Tiende a establecerse en el valor máximo de tiempo que le toma a la función ejecutarse en el hardware dado.
+
+**Conclusión del Runtime:**
+El valor de **`g_app_runtime_us`** representa el **tiempo total en $\mu s$** que tomó la ejecución de **todas las tareas** dentro del ciclo de actualización actual de `app_update()` (en este caso, solo `task_test_update()`). Este valor se reinicia a 0 con cada ciclo de procesamiento de tick.
