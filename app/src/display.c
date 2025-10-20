@@ -312,5 +312,5 @@ static void displayDataBusWrite( uint8_t dataBus )
     displayPinWrite( DISPLAY_PIN_EN, ON );
     systick_delay_us(DISPLAY_DEL_37US);
     displayPinWrite( DISPLAY_PIN_EN, OFF );
-    systick_delay_us(DISPLAY_DEL_37US);HAL_Delay(1000);
+    HAL_Delay(1000);
 }
