@@ -1,5 +1,4 @@
 
-
 Registro de evolución de las variables g_app_runtime_us y task_dta_list[index].WCET 
 
 g_app_runtime_us
