@@ -1,5 +1,46 @@
-  app.c (app.h)
-   Endless loops, which execute tasks with fixed computing time. This 
-   sequential execution is only deviated from when an interrupt event occurs.
 
-...
+
+Registro de evolución de las variables g_app_runtime_us y task_dta_list[index].WCET 
+
+g_app_runtime_us
+
+En_update: Para cada ciclo del while se inicializa la variable con valor 0 y
+luego se actualiza dentro del for hasta alcanzar g_app_runtime_us=2 dado por
+el cambio de cycle_counter_time_us. 
+
+
+task_dta_list[index].WCET 
+
+En app_init: Notamos en el ciclo for que la variable se actualiza de valor 0 a 256 para
+el indice perteneciente a la única tarea definida en task_cfg_list[].
+Se actualiza si el tiempo medido en g_app_runtime_us es mayor que el valor guardado del mismo.
+
+	for (index = 0; TASK_QTY > index; index++)
+	{
+		/* Run task_x_init */
+		(*task_cfg_list[index].task_init)(task_cfg_list[index].parameters);
+
+		/* Init variables */
+		task_dta_list[index].WCET = TASK_X_WCET_INI;
+	}
+	
+	
+En_update: similar que en app_init se actualiza en el ciclo for hasta un resultado final de 256
+
+		for (index = 0; TASK_QTY > index; index++)
+		{
+			cycle_counter_reset();
+
+    		/* Run task_x_update */
+			(*task_cfg_list[index].task_update)(task_cfg_list[index].parameters);
+
+			cycle_counter_time_us = cycle_counter_get_time_us();
+
+			/* Update variables */
+			g_app_runtime_us += cycle_counter_time_us;
+
+			if (task_dta_list[index].WCET < cycle_counter_time_us)
+			{
+				task_dta_list[index].WCET = cycle_counter_time_us;
+			}
+		}
